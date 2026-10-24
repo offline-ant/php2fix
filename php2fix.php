@@ -1,6 +1,6 @@
 <?php
 /**
- * php2fix.php -- one-file php2shell runner and "fixer", PHP 8.1 .. 8.5.
+ * php2fix.php -- one-file php2shell runner and "fixer", targets PHP 8.2 .. 8.5.
  *
  *   GET  /php2fix.php          -> HTML form (target address + options)
  *   POST /php2fix.php          -> runs the exploit against the target
@@ -26,8 +26,8 @@
  *     the installed copy at its own host, remove `.user.ini` first; the tool
  *     warns about this.
  *
- * Language level: written against the 8.1 baseline (no 8.2+ features), so the
- * same file runs unchanged on 8.1 .. 8.5.
+ * Language level: no syntax newer than 8.1, so the page itself runs anywhere the
+ * targets live; the versions it exploits are 8.2, 8.3, 8.4 and 8.5.
  */
 
 declare(strict_types=1);
@@ -1599,9 +1599,8 @@ $self = p2f_self_url();
 <p class="note" style="margin:0 0 1.2rem"><strong>Scope:</strong> this works only against
  <strong>mod_php</strong> (<code>apache2handler</code>) &mdash; <em>not</em> PHP-FPM, CGI or
  the built-in server, whose request-startup order differs and where the dangling-state
- chain does not exist. The page itself runs on PHP <strong>8.1 &ndash; 8.5</strong>; the
- targets it can currently drive are PHP 8.2, 8.3, 8.4 and 8.5 (8.1 needs its offsets
- learned first, see <code>?learn=</code>).</p>
+ chain does not exist. It exploits PHP <strong>8.2, 8.3, 8.4 and 8.5</strong>; any other
+ build of those versions needs its offsets learned first, see <code>?learn=</code>.</p>
 <form method="post" action="">
   <label for="host">target host</label>
   <input type="text" id="host" name="host" value="<?= p2f_h($opts['host']) ?>">

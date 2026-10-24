@@ -105,9 +105,8 @@ opcache, which is why the tool never warms anything.
 
 * **mod_php (`apache2handler`) only** — not PHP-FPM, CGI or the built-in server:
   their request-startup order differs, so the dangling-state chain does not exist.
-* The page itself runs on PHP **8.1 – 8.5**; the targets it drives today are 8.2,
-  8.3, 8.4 and 8.5 on x86-64 NTS builds.  Another build of the same version needs
-  its own offsets, which is what `?learn=` is for.
+* It exploits PHP **8.2, 8.3, 8.4 and 8.5** on x86-64 NTS builds.  Another
+  build of the same version needs its own offsets, which is what `?learn=` is for.
 * Every node is **stock**: default `php.ini`, default 150-worker prefork.  The
   only thing the tool needs from a target is what a normal web app needs:
   `file_uploads=On` and `session.upload_progress.enabled=On` (both default).
